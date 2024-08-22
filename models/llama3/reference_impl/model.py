@@ -27,6 +27,42 @@ from ..api import ModelArgs
 # dependencies. These dependencies are not part of the default dependencies
 # (requirements.txt) of the `llama-models` package.
 
+class ColumnParallelLinearEinsum(ColumnParallelLinear):
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:  # type: ignore
+        # Set up backprop all-reduce.
+        input_parallel = copy_to_model_parallel_region(input_)
+
+        # Use torch.einsum instead of F.linear
+        # The einsum operation equivalent to F.linear(X, W, b) is "ij,kj->ik"
+        output_parallel = torch.einsum('ij,kj->ik', input_parallel, self.weight)
+        if self.bias:
+            output_parallel += self.bias
+        
+        if self.gather_output:
+            # All-gather across the partitions.
+            output = gather_from_model_parallel_region(output_parallel)
+        else:
+            output = output_parallel
+        return output
+
+class RowParallelLinearEinsum(RowParallelLinear):
+    def forward(self, input_: torch.Tensor) -> torch.Tensor:  # type:ignore
+        # Set up backprop all-reduce.
+        if self.input_is_parallel:
+            input_parallel = input_
+        else:
+            input_parallel = scatter_to_model_parallel_region(input_)
+        
+        # Use torch.einsum instead of F.linear
+        # The einsum operation equivalent to F.linear(X, W, b) is "ij,kj->ik"
+        output_parallel = torch.einsum('ij,kj->ik', input_parallel, self.weight)
+        # All-reduce across all the partitions.
+        output_ = reduce_from_model_parallel_region(output_parallel)
+        if self.bias is not None:
+            output = output_ + self.bias
+        else:
+            output = output_
+        return output
 
 class RMSNorm(torch.nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6):
@@ -122,28 +158,28 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = args.dim // args.n_heads
 
-        self.wq = ColumnParallelLinear(
+        self.wq = ColumnParallelLinearEinsum(
             args.dim,
             args.n_heads * self.head_dim,
             bias=False,
             gather_output=False,
             init_method=lambda x: x,
         )
-        self.wk = ColumnParallelLinear(
+        self.wk = ColumnParallelLinearEinsum(
             args.dim,
             self.n_kv_heads * self.head_dim,
             bias=False,
             gather_output=False,
             init_method=lambda x: x,
         )
-        self.wv = ColumnParallelLinear(
+        self.wv = ColumnParallelLinearEinsum(
             args.dim,
             self.n_kv_heads * self.head_dim,
             bias=False,
             gather_output=False,
             init_method=lambda x: x,
         )
-        self.wo = RowParallelLinear(
+        self.wo = RowParallelLinearEinsum(
             args.n_heads * self.head_dim,
             args.dim,
             bias=False,
@@ -230,13 +266,13 @@ class FeedForward(nn.Module):
             hidden_dim = int(ffn_dim_multiplier * hidden_dim)
         hidden_dim = multiple_of * ((hidden_dim + multiple_of - 1) // multiple_of)
 
-        self.w1 = ColumnParallelLinear(
+        self.w1 = ColumnParallelLinearEinsum(
             dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
         )
-        self.w2 = RowParallelLinear(
+        self.w2 = RowParallelLinearEinsum(
             hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
         )
-        self.w3 = ColumnParallelLinear(
+        self.w3 = ColumnParallelLinearEinsum(
             dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
         )
 
@@ -289,7 +325,7 @@ class Transformer(nn.Module):
             self.layers.append(TransformerBlock(layer_id, params))
 
         self.norm = RMSNorm(params.dim, eps=params.norm_eps)
-        self.output = ColumnParallelLinear(
+        self.output = ColumnParallelLinearEinsum(
             params.dim, params.vocab_size, bias=False, init_method=lambda x: x
         )
 
