@@ -23,6 +23,16 @@ from torch import nn
 
 from ..api import ModelArgs
 
+from fairscale.nn.model_parallel.mappings import (
+    copy_to_model_parallel_region,
+    gather_from_model_parallel_region,
+    reduce_from_model_parallel_region,
+    scatter_to_model_parallel_region,
+)
+
+from fairscale.nn.model_parallel.initialize import get_model_parallel_rank, get_model_parallel_world_size
+
+
 # **NOTE**: This code is not runnable without installing `torch` and `fairscale`
 # dependencies. These dependencies are not part of the default dependencies
 # (requirements.txt) of the `llama-models` package.
@@ -34,7 +44,7 @@ class ColumnParallelLinearEinsum(ColumnParallelLinear):
 
         # Use torch.einsum instead of F.linear
         # The einsum operation equivalent to F.linear(X, W, b) is "ij,kj->ik"
-        output_parallel = torch.einsum('ij,kj->ik', input_parallel, self.weight)
+        output_parallel = torch.einsum('bij,kj->bik', input_parallel, self.weight)
         if self.bias:
             output_parallel += self.bias
         
@@ -55,7 +65,7 @@ class RowParallelLinearEinsum(RowParallelLinear):
         
         # Use torch.einsum instead of F.linear
         # The einsum operation equivalent to F.linear(X, W, b) is "ij,kj->ik"
-        output_parallel = torch.einsum('ij,kj->ik', input_parallel, self.weight)
+        output_parallel = torch.einsum('bij,kj->bik', input_parallel, self.weight)
         # All-reduce across all the partitions.
         output_ = reduce_from_model_parallel_region(output_parallel)
         if self.bias is not None:
