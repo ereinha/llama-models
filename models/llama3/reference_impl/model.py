@@ -189,7 +189,7 @@ class Attention(nn.Module):
             gather_output=False,
             init_method=lambda x: x,
         )
-        self.wo = RowParallelLinearEinsum(
+        self.wo = RowParallelLinear(
             args.n_heads * self.head_dim,
             args.dim,
             bias=False,
@@ -279,7 +279,7 @@ class FeedForward(nn.Module):
         self.w1 = ColumnParallelLinearEinsum(
             dim, hidden_dim, bias=False, gather_output=False, init_method=lambda x: x
         )
-        self.w2 = RowParallelLinearEinsum(
+        self.w2 = RowParallelLinear(
             hidden_dim, dim, bias=False, input_is_parallel=True, init_method=lambda x: x
         )
         self.w3 = ColumnParallelLinearEinsum(
